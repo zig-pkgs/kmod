@@ -5,77 +5,12 @@ const posix = std.posix;
 const compress = std.compress;
 const assert = std.debug.assert;
 const signature = @import("signature.zig");
+const builtin = @import("builtin");
+const native_arch = builtin.cpu.arch;
 const testing = std.testing;
 
 const max_module_size = 32 * 1024 * 1024;
 const gpa = std.heap.c_allocator;
-
-comptime {
-    @export(&signature.kmod_module_signature_info, .{
-        .name = "kmod_module_signature_info",
-    });
-    @export(&signature.kmod_module_signature_info_free, .{
-        .name = "kmod_module_signature_info_free",
-    });
-}
-
-fn uncompressXz(file: std.fs.File) ![]u8 {
-    const reader = file.reader();
-    var d = try compress.xz.decompress(gpa, reader);
-    defer d.deinit();
-    var buf = std.ArrayList(u8).init(gpa);
-    defer buf.deinit();
-    try d.reader().readAllArrayList(&buf, max_module_size);
-    return try buf.toOwnedSlice();
-}
-
-export fn kmod_file_load_xz(file: [*c]c.kmod_file) c_int {
-    const f: std.fs.File = .{ .handle = file.*.fd };
-    const buf = uncompressXz(f) catch return -1;
-    file.*.memory = buf.ptr;
-    file.*.size = @intCast(buf.len);
-    return 0;
-}
-
-fn uncompressGz(file: std.fs.File) ![]u8 {
-    const reader = file.reader();
-    var buf = std.ArrayList(u8).init(gpa);
-    defer buf.deinit();
-    try compress.gzip.decompress(reader, buf.writer());
-    return try buf.toOwnedSlice();
-}
-
-export fn kmod_file_load_zlib(file: [*c]c.kmod_file) c_int {
-    var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
-    defer arena.deinit();
-
-    const f: std.fs.File = .{ .handle = file.*.fd };
-    const buf = uncompressGz(f) catch return -1;
-    file.*.memory = buf.ptr;
-    file.*.size = @intCast(buf.len);
-    return 0;
-}
-
-fn uncompressZstd(file: std.fs.File) ![]u8 {
-    const reader = file.reader();
-    const window_size = std.compress.zstd.DecompressorOptions.default_window_buffer_len;
-    const window_buffer = try gpa.create([window_size]u8);
-    var d = compress.zstd.decompressor(reader, .{
-        .window_buffer = window_buffer,
-    });
-    var buf = std.ArrayList(u8).init(gpa);
-    defer buf.deinit();
-    try d.reader().readAllArrayList(&buf, max_module_size);
-    return try buf.toOwnedSlice();
-}
-
-export fn kmod_file_load_zstd(file: [*c]c.kmod_file) c_int {
-    const f: std.fs.File = .{ .handle = file.*.fd };
-    const buf = uncompressZstd(f) catch return -1;
-    file.*.memory = buf.ptr;
-    file.*.size = @intCast(buf.len);
-    return 0;
-}
 
 pub const Context = struct {
     ctx: *c.kmod_ctx,
@@ -197,27 +132,45 @@ pub const Context = struct {
             return error.GetInfoFailed;
         }
 
-        pub const InsertOptions = struct {
-            // dry run, do not insert module, just call the associated callback function
-            dry_run: bool = false,
-            // do not check whether the module is already live in the kernel or not
-            ignore_loaded: bool = false,
-            // probe will fail if `ignore_loaded` is not specified and
-            // the module is already live in the kernel
-            fail_on_loaded: bool = false,
-            // probe will return early with this enum, if the module is blacklisted
-            apply_blacklist: bool = true,
+        /// Flags to control the behavior of a kernel module probe operation.
+        /// This is a packed struct that maps directly to the C kmod_probe bitmask.
+        pub const ProbeFlags = packed struct(c_uint) {
+            /// Corresponds to KMOD_PROBE_FORCE_VERMAGIC (0x00001)
+            force_vermagic: bool = false, // bit 0
+            /// Corresponds to KMOD_PROBE_FORCE_MODVERSION (0x00002)
+            force_modversion: bool = false, // bit 1
+            /// Corresponds to KMOD_PROBE_IGNORE_COMMAND (0x00004)
+            ignore_command: bool = false, // bit 2
+            /// Corresponds to KMOD_PROBE_IGNORE_LOADED (0x00008)
+            ignore_loaded: bool = false, // bit 3
+            /// Corresponds to KMOD_PROBE_DRY_RUN (0x00010)
+            dry_run: bool = false, // bit 4
+            /// Corresponds to KMOD_PROBE_FAIL_ON_LOADED (0x00020)
+            fail_on_loaded: bool = false, // bit 5
+
+            /// Padding for unused bits 6 through 15.
+            _padding1: u10 = 0,
+
+            /// Corresponds to KMOD_PROBE_APPLY_BLACKLIST_ALL (0x10000)
+            apply_blacklist_all: bool = false, // bit 16
+            /// Corresponds to KMOD_PROBE_APPLY_BLACKLIST (0x20000)
+            apply_blacklist: bool = false, // bit 17
+            /// Corresponds to KMOD_PROBE_APPLY_BLACKLIST_ALIAS_ONLY (0x40000)
+            apply_blacklist_alias_only: bool = false, // bit 18
+
+            /// Padding for the remaining unused bits to fill a 32-bit integer.
+            _padding2: u13 = 0,
+
+            // Compile-time check to ensure the struct size is correct.
+            comptime {
+                std.debug.assert(@sizeOf(ProbeFlags) == @sizeOf(c_uint));
+            }
         };
 
-        pub fn insert(self: *const Module, options: InsertOptions) !void {
-            var flags: c_uint = 0;
-            if (options.apply_blacklist) flags |= c.KMOD_PROBE_APPLY_BLACKLIST;
-            if (options.fail_on_loaded) flags |= c.KMOD_PROBE_FAIL_ON_LOADED;
-            if (options.ignore_loaded) flags |= c.KMOD_PROBE_IGNORE_LOADED;
-            if (options.dry_run) flags |= c.KMOD_PROBE_DRY_RUN;
+        pub fn insert(self: *const Module, flags: ProbeFlags) !void {
             const rc = c.kmod_module_probe_insert_module(
                 self.mod,
-                flags,
+                @bitCast(flags),
                 null,
                 null,
                 null,
@@ -230,18 +183,37 @@ pub const Context = struct {
             }
         }
 
-        pub const RemoveOptions = struct {
-            force: bool = false,
-            no_wait: bool = false,
-            no_log: bool = false,
+        /// aliased from std.os.linux.O (O.TRUNC and O.NONBLOCK).
+        pub const RemoveFlags = switch (native_arch) {
+            .x86_64, .aarch64 => packed struct(c_uint) {
+                /// Corresponds to KMOD_REMOVE_NOLOG (1)
+                no_log: bool = false, // bit 0
+
+                /// Padding for unused bits 1 through 8.
+                _padding1: u8 = 0,
+
+                /// Corresponds to KMOD_REMOVE_FORCE (O.TRUNC = 512)
+                force: bool = false, // bit 9
+
+                /// Padding for unused bit 10.
+                _padding2: u1 = 0,
+
+                /// Corresponds to KMOD_REMOVE_NOWAIT (O.NONBLOCK = 2048)
+                no_wait: bool = false, // bit 11
+
+                /// Padding for the remaining unused bits to fill a 32-bit integer.
+                _padding3: u20 = 0,
+
+                // Compile-time check to ensure the struct size is correct.
+                comptime {
+                    std.debug.assert(@sizeOf(RemoveFlags) == @sizeOf(c_uint));
+                }
+            },
+            else => @compileError("missing RemoveFlags constants for this architecture"),
         };
 
-        pub fn remove(self: *const Module, options: RemoveOptions) !void {
-            var flags: c_uint = 0;
-            if (options.force) flags |= c.KMOD_REMOVE_FORCE;
-            if (options.no_log) flags |= c.KMOD_REMOVE_NOLOG;
-            if (options.no_wait) flags |= c.KMOD_REMOVE_NOWAIT;
-            const rc = c.kmod_module_remove_module(self.mod, flags);
+        pub fn remove(self: *const Module, flags: RemoveFlags) !void {
+            const rc = c.kmod_module_remove_module(self.mod, @bitCast(flags));
             switch (posix.errno(rc)) {
                 .SUCCESS => {},
                 .PERM => return error.PermissionDenied,
