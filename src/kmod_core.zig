@@ -22,13 +22,10 @@ comptime {
 fn uncompressXz(file: std.fs.File) ![]u8 {
     var read_buffer: [8 * 1024]u8 = undefined;
     var file_reader = file.reader(&read_buffer);
-    var reader = &file_reader.interface;
-    var d = try compress.xz.decompress(gpa, reader.adaptToOldInterface());
-    defer d.deinit();
-    var buf: std.array_list.Managed(u8) = .init(gpa);
-    defer buf.deinit();
-    try d.reader().readAllArrayList(&buf, max_module_size);
-    return try buf.toOwnedSlice();
+    const reader = &file_reader.interface;
+    var decompress: std.compress.xz.Decompress = try .init(reader, gpa, &.{});
+    defer decompress.deinit();
+    return try decompress.reader.allocRemaining(gpa, .unlimited);
 }
 
 export fn kmod_file_load_xz(file: [*c]c.kmod_file) c_int {
