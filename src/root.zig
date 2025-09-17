@@ -227,13 +227,14 @@ pub const Context = struct {
     };
 
     pub const InitOptions = struct {
-        dirname: [*c]const u8 = null,
+        dirname: ?[:0]const u8 = null,
         load_resources: bool = false,
     };
 
     pub fn init(options: InitOptions) !Context {
         var null_config: [*c]const u8 = null;
-        const ctx_maybe = c.kmod_new(options.dirname, &null_config);
+        const dirname: [*c]const u8 = if (options.dirname) |d| d.ptr else null;
+        const ctx_maybe = c.kmod_new(dirname, &null_config);
         if (ctx_maybe) |ctx| {
             @branchHint(.likely);
             var resources_loaded: bool = false;
