@@ -254,6 +254,16 @@ pub const Context = struct {
         _ = c.kmod_unref(self.ctx);
     }
 
+    pub fn newModFromName(self: *Context, name: [:0]const u8) !Module {
+        var mod: ?*c.kmod_module = null;
+        if (c.kmod_module_new_from_name(self.ctx, name.ptr, &mod) != 0) {
+            @branchHint(.unlikely);
+            return error.ModuleInitFailure;
+        }
+        assert(mod != null);
+        return .{ .mod = mod.? };
+    }
+
     pub fn lookup(self: *Context, alias: [:0]const u8) !Module.Iterator {
         var list_maybe: ?*c.kmod_list = null;
         if (c.kmod_module_new_from_lookup(self.ctx, alias, &list_maybe) != 0) {
