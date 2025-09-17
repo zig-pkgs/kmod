@@ -77,24 +77,27 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    const lib_mod = b.addModule("kmod", .{
+    const mod = b.addModule("kmod", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
-        .link_libc = true,
         .imports = &.{
             .{ .name = "c", .module = c_mod },
         },
     });
-    lib_mod.addIncludePath(kmod_dep.path("."));
-    lib_mod.addIncludePath(kmod_dep.path("shared"));
-    lib_mod.addIncludePath(kmod_dep.path("libkmod"));
 
     const lib = b.addLibrary(.{
         .linkage = .static,
         .name = "kmod",
-        .root_module = lib_mod,
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
     });
+    lib.addIncludePath(kmod_dep.path("."));
+    lib.addIncludePath(kmod_dep.path("shared"));
+    lib.addIncludePath(kmod_dep.path("libkmod"));
     lib.linkLibrary(core_lib);
     lib.addConfigHeader(config_h);
     lib.addCSourceFiles(.{
@@ -114,8 +117,9 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(lib);
 
     const lib_unit_tests = b.addTest(.{
-        .root_module = lib_mod,
+        .root_module = mod,
     });
+    lib_unit_tests.linkLibrary(lib);
 
     const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
     const test_step = b.step("test", "Run unit tests");
